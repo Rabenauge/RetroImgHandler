@@ -28,9 +28,6 @@ cover [Amiga indexed ILBM and Raw planar export](Manual/platforms/amiga.md),
 [Atari 8-bit](Manual/platforms/atari-8bit.md), and
 [Netpbm/PFM](Manual/netpbm.md).
 
-See [LOCAL_NPM_REGISTRY.md](LOCAL_NPM_REGISTRY.md) for installing a package
-tarball or publishing RetroImgHandler through a private npm registry.
-
 ## Local development
 
 ```sh
