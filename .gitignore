@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+demo/dist/
+playwright-report/
+test-results/
+temp_testfiles
+.worktrees/
+*.tgz
+docs/
+AI/
+AGENTS.md

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RetroImgHandler demo</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>RetroImgHandler</h1>
+      <p>Load a supported native retro image to inspect its format, limits, and preview.</p>
+      <label class="picker">Image file <input id="file" type="file" /></label>
+      <p id="status" role="status">Waiting for a file.</p>
+      <section id="warnings" class="warnings" aria-labelledby="warnings-title" hidden>
+        <h2 id="warnings-title">Warnings</h2>
+        <div id="warning-list"></div>
+      </section>
+      <section class="preview-panel">
+        <canvas id="preview" aria-label="Decoded image preview"></canvas>
+        <div>
+          <button id="native" disabled>Download native</button>
+          <button id="png" disabled>Download PNG</button>
+        </div>
+      </section>
+      <h2>Detection</h2>
+      <pre id="detection">[]</pre>
+      <h2>Format limitations</h2>
+      <pre id="definition">{}</pre>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

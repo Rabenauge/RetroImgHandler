@@ -1,0 +1,74 @@
+{
+  "name": "retro-img-handler",
+  "version": "0.2.1",
+  "description": "Browser and Web Worker codecs for native retro-computer image formats",
+  "author": "T.Grothaus (titusrab)",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "Manual",
+    "LOCAL_NPM_REGISTRY.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./amiga": {
+      "types": "./dist/amiga.d.ts",
+      "import": "./dist/amiga.js"
+    },
+    "./c64": {
+      "types": "./dist/c64.d.ts",
+      "import": "./dist/c64.js"
+    },
+    "./spectrum": {
+      "types": "./dist/spectrum.d.ts",
+      "import": "./dist/spectrum.js"
+    },
+    "./atari-st": {
+      "types": "./dist/atari-st.d.ts",
+      "import": "./dist/atari-st.js"
+    },
+    "./atari-8bit": {
+      "types": "./dist/atari-8bit.d.ts",
+      "import": "./dist/atari-8bit.js"
+    },
+    "./png": {
+      "types": "./dist/png.d.ts",
+      "import": "./dist/png.js"
+    },
+    "./netpbm": {
+      "types": "./dist/netpbm.d.ts",
+      "import": "./dist/netpbm.js"
+    }
+  },
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:browser": "playwright test",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:package": "npm pack --dry-run && publint && node scripts/check-consumer.mjs",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run test:browser && npm run check:docs && npm run build && npm run check:package",
+    "dev": "vite --config demo/vite.config.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.32.0",
+    "@playwright/test": "^1.54.2",
+    "@types/node": "^24.2.1",
+    "eslint": "^9.32.0",
+    "publint": "^0.3.12",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.39.0",
+    "vite": "^7.1.1",
+    "vite-plugin-dts": "^4.5.4",
+    "vitest": "^3.2.4"
+  }
+}
