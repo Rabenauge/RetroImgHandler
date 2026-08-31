@@ -1,6 +1,6 @@
 # RetroImgHandler
 
-`retro-img-handler` is a TypeScript library for decoding, validating,
+`retro-img-handler` 0.3.0 is a TypeScript library for decoding, validating,
 converting, previewing, and encoding native retro-computer graphics in modern
 web applications and Web Workers.
 

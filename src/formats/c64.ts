@@ -1,10 +1,15 @@
 import { extensionOf } from "../core/binary";
-import { indexedToRgba, nearestColorIndex } from "../core/color";
-import { genericConvert, imagePreview } from "../core/conversion";
+import { indexedToRgba, nearestColorIndex, rgbaColorAt } from "../core/color";
+import { genericConvert, imagePreview, prepareConversionImage } from "../core/conversion";
 import { RetroImageError } from "../core/errors";
 import type {
   AnalysisIssue,
+  C64ColorMatchResult,
+  C64ColorMatchSample,
+  C64ConversionOptions,
   CodecTarget,
+  ConversionOptions,
+  ConversionResult,
   DecodeOptions,
   EncodeOptions,
   EncodeResult,
@@ -25,6 +30,123 @@ export const c64Palette: RgbColor[] = [
   { r: 142, g: 80, b: 41 }, { r: 85, g: 56, b: 0 }, { r: 196, g: 108, b: 113 }, { r: 74, g: 74, b: 74 },
   { r: 123, g: 123, b: 123 }, { r: 169, g: 255, b: 159 }, { r: 112, g: 109, b: 235 }, { r: 178, g: 178, b: 178 }
 ];
+
+function validateDisplayPalette(displayPalette: RgbColor[]): void {
+  if (displayPalette.length !== 16) throw new RetroImageError("INVALID_OPTION", "C64 displayPalette must contain exactly 16 colors");
+}
+
+function validateColorCode(colorCode: number, label: string): void {
+  if (!Number.isInteger(colorCode) || colorCode < 0 || colorCode > 15) throw new RetroImageError("INVALID_OPTION", `${label} must be a C64 color code from 0 through 15`);
+}
+
+function linearSrgb(component: number): number {
+  const value = Math.max(0, Math.min(255, component)) / 255;
+  return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function oklab(color: RgbColor): [number, number, number] {
+  const red = linearSrgb(color.r), green = linearSrgb(color.g), blue = linearSrgb(color.b);
+  const l = Math.cbrt(0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue);
+  const m = Math.cbrt(0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue);
+  const s = Math.cbrt(0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue);
+  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+}
+
+function oklabDistanceSquared(left: RgbColor, right: RgbColor): number {
+  const a = oklab(left), b = oklab(right);
+  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+}
+
+/** Match RGB samples to native VIC-II color codes using weighted OKLab distance. */
+export function matchC64ColorCodes(samples: C64ColorMatchSample[], displayPalette: RgbColor[]): C64ColorMatchResult {
+  validateDisplayPalette(displayPalette);
+  let weightedDistance = 0;
+  let totalWeight = 0;
+  const matches = samples.map(({ color, weight = 1, pinnedColorCode }) => {
+    if (!Number.isFinite(weight) || weight < 0) throw new RetroImageError("INVALID_OPTION", "C64 match sample weights must be finite and non-negative");
+    const pinned = pinnedColorCode !== undefined;
+    if (pinned) validateColorCode(pinnedColorCode, "pinnedColorCode");
+    let colorCode = pinnedColorCode ?? 0;
+    let distance = Number.POSITIVE_INFINITY;
+    if (pinned) distance = oklabDistanceSquared(color, displayPalette[colorCode]!);
+    else for (let code = 0; code < displayPalette.length; code += 1) {
+      const next = oklabDistanceSquared(color, displayPalette[code]!);
+      if (next < distance) {
+        distance = next;
+        colorCode = code;
+      }
+    }
+    weightedDistance += weight * distance;
+    totalWeight += weight;
+    return { colorCode, distance, pinned };
+  });
+  if (samples.length > 0 && totalWeight === 0) throw new RetroImageError("INVALID_OPTION", "C64 match samples must have a positive total weight");
+  return { matches, weightedMeanDistance: totalWeight === 0 ? 0 : weightedDistance / totalWeight };
+}
+
+function colorKey({ r, g, b }: RgbColor): string {
+  return `${r},${g},${b}`;
+}
+
+interface NativeC64Codes {
+  indices: Uint8Array;
+  pinnedCodes: Uint8Array;
+  report: C64ColorMatchResult;
+}
+
+function mapNativeC64Codes(image: RgbaImage, options: C64ConversionOptions): NativeC64Codes {
+  validateDisplayPalette(options.displayPalette);
+  const sourceColorCodes = new Map<string, { colorCode: number; pinned: boolean }>();
+  for (const source of options.sourceColorCodes ?? []) {
+    validateColorCode(source.colorCode, "sourceColorCodes.colorCode");
+    const key = colorKey(source.sourceColor);
+    if (sourceColorCodes.has(key)) throw new RetroImageError("INVALID_OPTION", "sourceColorCodes must not map one RGB color more than once");
+    sourceColorCodes.set(key, { colorCode: source.colorCode, pinned: source.pinned ?? false });
+  }
+  const assignments = new Map<string, { colorCode: number; distance: number; pinned: boolean }>();
+  for (let pixel = 0; pixel < image.width * image.height; pixel += 1) {
+    const color = rgbaColorAt(image, pixel);
+    const key = colorKey(color);
+    if (assignments.has(key)) continue;
+    const source = sourceColorCodes.get(key);
+    if (source) {
+      assignments.set(key, { colorCode: source.colorCode, distance: oklabDistanceSquared(color, options.displayPalette[source.colorCode]!), pinned: source.pinned });
+    } else {
+      assignments.set(key, matchC64ColorCodes([{ color }], options.displayPalette).matches[0]!);
+    }
+  }
+  const indices = new Uint8Array(image.width * image.height);
+  const pinnedCodes = new Uint8Array(indices.length).fill(255);
+  let weightedDistance = 0;
+  for (let pixel = 0; pixel < indices.length; pixel += 1) {
+    const assignment = assignments.get(colorKey(rgbaColorAt(image, pixel)))!;
+    indices[pixel] = assignment.colorCode;
+    if (assignment.pinned) pinnedCodes[pixel] = assignment.colorCode;
+    weightedDistance += assignment.distance;
+  }
+  return { indices, pinnedCodes, report: { matches: [...assignments.values()], weightedMeanDistance: weightedDistance / indices.length } };
+}
+
+function nativeRaster(image: RgbaImage, target: CodecTarget, mode: FormatModeDefinition, options: C64ConversionOptions): { document: RasterDocument; report: C64ColorMatchResult } {
+  const mapped = mapNativeC64Codes(image, options);
+  return {
+    document: {
+      kind: "raster", formatId: target.formatId, modeId: target.modeId, width: image.width, height: image.height, pixelAspect: mode.pixelAspect,
+      displayProfile: target.displayProfile, palette: options.displayPalette.map((color) => ({ ...color })), indices: mapped.indices,
+      preview: indexedToRgba(mapped.indices, image.width, image.height, options.displayPalette), components: { c64PinnedCodes: mapped.pinnedCodes },
+      metadata: { c64NativeColorCodes: true }, warnings: [], preserved: []
+    },
+    report: mapped.report
+  };
+}
+
+function nativeCodes(document: RetroImageDocument): Uint8Array | undefined {
+  return document.kind === "raster" && document.metadata.c64NativeColorCodes === true ? document.indices : undefined;
+}
+
+function pinnedCodes(document: RetroImageDocument): Uint8Array | undefined {
+  return document.kind === "raster" && document.metadata.c64NativeColorCodes === true ? document.components.c64PinnedCodes : undefined;
+}
 
 const hiresMode: FormatModeDefinition = {
   id: "hires-bitmap", label: "Hires bitmap", dimensions: [{ width: 320, height: 200 }], pixelAspect: { numerator: 1, denominator: 1 },
@@ -75,7 +197,7 @@ function decodeHires(bitmap: Uint8Array, screen: Uint8Array, formatId: string, o
       for (let x = 0; x < 8; x += 1) indices[(cy * 8 + row) * 320 + cx * 8 + x] = bits & (0x80 >>> x) ? foreground : background;
     }
   }
-  return rasterDocument({ formatId, modeId: "hires-bitmap", width: 320, height: 200, pixelAspect: hiresMode.pixelAspect, displayProfile: profile(options), palette: options.palette ?? c64Palette, indices, components: { bitmap: bitmap.slice(0, 8000), screen: screen.slice(0, 1000), ...extra }, metadata: {}, warnings: options.displayProfile ? [] : [{ code: "ASSUMED_DISPLAY_PROFILE", message: "Used the canonical C64 PAL display profile" }], preserved: [] });
+  return rasterDocument({ formatId, modeId: "hires-bitmap", width: 320, height: 200, pixelAspect: hiresMode.pixelAspect, displayProfile: profile(options), palette: options.palette ?? c64Palette, indices, components: { bitmap: bitmap.slice(0, 8000), screen: screen.slice(0, 1000), ...extra }, metadata: { c64NativeColorCodes: true }, warnings: options.displayProfile ? [] : [{ code: "ASSUMED_DISPLAY_PROFILE", message: "Used the canonical C64 PAL display profile" }], preserved: [] });
 }
 
 function decodeMulticolor(bitmap: Uint8Array, screen: Uint8Array, colorRam: Uint8Array, background: number, formatId: string, options: DecodeOptions): RasterDocument {
@@ -89,7 +211,7 @@ function decodeMulticolor(bitmap: Uint8Array, screen: Uint8Array, colorRam: Uint
       for (let x = 0; x < 4; x += 1) indices[(cy * 8 + row) * 160 + cx * 4 + x] = colors[(bits >>> (6 - x * 2)) & 3]!;
     }
   }
-  return rasterDocument({ formatId, modeId: "multicolor-bitmap", width: 160, height: 200, pixelAspect: multicolorMode.pixelAspect, displayProfile: profile(options), palette: options.palette ?? c64Palette, indices, components: { bitmap: bitmap.slice(0, 8000), screen: screen.slice(0, 1000), colorRam: colorRam.slice(0, 1000), background: Uint8Array.of(background & 0xf) }, metadata: { background: background & 0xf }, warnings: options.displayProfile ? [] : [{ code: "ASSUMED_DISPLAY_PROFILE", message: "Used the canonical C64 PAL display profile" }], preserved: [] });
+  return rasterDocument({ formatId, modeId: "multicolor-bitmap", width: 160, height: 200, pixelAspect: multicolorMode.pixelAspect, displayProfile: profile(options), palette: options.palette ?? c64Palette, indices, components: { bitmap: bitmap.slice(0, 8000), screen: screen.slice(0, 1000), colorRam: colorRam.slice(0, 1000), background: Uint8Array.of(background & 0xf) }, metadata: { background: background & 0xf, c64NativeColorCodes: true }, warnings: options.displayProfile ? [] : [{ code: "ASSUMED_DISPLAY_PROFILE", message: "Used the canonical C64 PAL display profile" }], preserved: [] });
 }
 
 function loadPayload(data: Uint8Array, address: number, allowedLengths: number[]): Uint8Array {
@@ -99,13 +221,14 @@ function loadPayload(data: Uint8Array, address: number, allowedLengths: number[]
 
 function formatIssues(image: RgbaImage | RetroImageDocument, target: CodecTarget, mode: FormatModeDefinition) {
   const preview = imagePreview(image);
+  const native = "kind" in image ? nativeCodes(image) : undefined;
   const issues: AnalysisIssue[] = [];
   if (mode.cell && mode.dimensions.some(({ width, height }) => width === preview.width && height === preview.height)) {
     for (let cy = 0; cy < 25; cy += 1) for (let cx = 0; cx < 40; cx += 1) {
       const colors = new Set<number>();
       for (let y = 0; y < mode.cell.height; y += 1) for (let x = 0; x < mode.cell.width; x += 1) {
         const pixel = (cy * mode.cell.height + y) * preview.width + cx * mode.cell.width + x;
-        colors.add(nearestColorIndex({ r: preview.data[pixel * 4]!, g: preview.data[pixel * 4 + 1]!, b: preview.data[pixel * 4 + 2]! }, c64Palette));
+        colors.add(native?.[pixel] ?? nearestColorIndex({ r: preview.data[pixel * 4]!, g: preview.data[pixel * 4 + 1]!, b: preview.data[pixel * 4 + 2]! }, c64Palette));
       }
       if (colors.size > mode.cell.maxColors) issues.push({ severity: "error", code: "C64_CELL_COLORS", message: `Cell ${cx},${cy} has ${colors.size} colors`, rule: "cell.maxColors", details: { x: cx, y: cy, colors: colors.size } });
     }
@@ -125,13 +248,71 @@ function cellColors(preview: RgbaImage, cx: number, cy: number, logicalCellWidth
   return result.slice(0, max);
 }
 
+function nativeCellColors(indices: Uint8Array, width: number, cx: number, cy: number, logicalCellWidth: number): number[] {
+  const counts = new Map<number, number>();
+  for (let y = 0; y < 8; y += 1) for (let x = 0; x < logicalCellWidth; x += 1) {
+    const code = indices[(cy * 8 + y) * width + cx * logicalCellWidth + x]!;
+    counts.set(code, (counts.get(code) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([code]) => code);
+}
+
+function nativePinnedCodes(indices: Uint8Array, pins: Uint8Array | undefined, width: number, cx: number, cy: number, logicalCellWidth: number): number[] {
+  if (!pins) return [];
+  const codes = new Set<number>();
+  for (let y = 0; y < 8; y += 1) for (let x = 0; x < logicalCellWidth; x += 1) {
+    const pixel = (cy * 8 + y) * width + cx * logicalCellWidth + x;
+    if (pins[pixel] !== 255) codes.add(indices[pixel]!);
+  }
+  return [...codes].sort((a, b) => a - b);
+}
+
+function nativeConstraintError(cx: number, cy: number, codes: number[], maximum: number, background?: number): never {
+  throw new RetroImageError("VALIDATION_FAILED", `C64 cell ${cx},${cy} has incompatible pinned native color codes`, {
+    x: cx, y: cy, codes, maximum, ...(background === undefined ? {} : { background })
+  });
+}
+
+function selectedNativeColor(document: RetroImageDocument, pixel: number, colors: number[]): number {
+  const indices = nativeCodes(document)!;
+  const wanted = indices[pixel]!;
+  const direct = colors.indexOf(wanted);
+  if (direct >= 0) return direct;
+  const palette = document.palette.length === 16 ? document.palette : c64Palette;
+  return nearestColorIndex(palette[wanted]!, colors.map((code) => palette[code]!));
+}
+
+function nativeKoalaBackground(document: RetroImageDocument): number {
+  const indices = nativeCodes(document)!;
+  const pins = pinnedCodes(document);
+  const totals = new Map<number, number>();
+  for (const code of indices) totals.set(code, (totals.get(code) ?? 0) + 1);
+  const candidates = Array.from({ length: 16 }, (_, code) => code).sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0) || a - b);
+  for (const background of candidates) {
+    let valid = true;
+    for (let cy = 0; cy < 25 && valid; cy += 1) for (let cx = 0; cx < 40; cx += 1) {
+      if (nativePinnedCodes(indices, pins, 160, cx, cy, 4).filter((code) => code !== background).length > 3) valid = false;
+    }
+    if (valid) return background;
+  }
+  for (let cy = 0; cy < 25; cy += 1) for (let cx = 0; cx < 40; cx += 1) {
+    const codes = nativePinnedCodes(indices, pins, 160, cx, cy, 4);
+    if (codes.length >= 4) nativeConstraintError(cx, cy, codes, 3);
+  }
+  throw new RetroImageError("VALIDATION_FAILED", "C64 multicolor background cannot satisfy pinned native color codes");
+}
+
 function encodeHires(document: RetroImageDocument, layout: "art" | "doodle" | "raw"): Uint8Array {
   const preview = document.preview;
   if (preview.width !== 320 || preview.height !== 200) throw new RetroImageError("VALIDATION_FAILED", "C64 hires output must be 320x200");
+  const native = nativeCodes(document);
+  const pins = pinnedCodes(document);
   const bitmap = new Uint8Array(8000);
   const screen = new Uint8Array(1000);
   for (let cy = 0; cy < 25; cy += 1) for (let cx = 0; cx < 40; cx += 1) {
-    const colors = cellColors(preview, cx, cy, 8, 2);
+    const pinned = native ? nativePinnedCodes(native, pins, 320, cx, cy, 8) : [];
+    if (pinned.length > 2) nativeConstraintError(cx, cy, pinned, 2);
+    const colors = native ? [...pinned, ...nativeCellColors(native, 320, cx, cy, 8).filter((code) => !pinned.includes(code))].slice(0, 2) : cellColors(preview, cx, cy, 8, 2);
     const background = colors[0] ?? 0;
     const foreground = colors[1] ?? background;
     screen[cy * 40 + cx] = (foreground << 4) | background;
@@ -139,7 +320,7 @@ function encodeHires(document: RetroImageDocument, layout: "art" | "doodle" | "r
       let bits = 0;
       for (let x = 0; x < 8; x += 1) {
         const pixel = ((cy * 8 + row) * 320 + cx * 8 + x) * 4;
-        const selected = nearestColorIndex({ r: preview.data[pixel]!, g: preview.data[pixel + 1]!, b: preview.data[pixel + 2]! }, [c64Palette[background]!, c64Palette[foreground]!]);
+        const selected = native ? selectedNativeColor(document, (cy * 8 + row) * 320 + cx * 8 + x, [background, foreground]) : nearestColorIndex({ r: preview.data[pixel]!, g: preview.data[pixel + 1]!, b: preview.data[pixel + 2]! }, [c64Palette[background]!, c64Palette[foreground]!]);
         if (selected === 1) bits |= 0x80 >>> x;
       }
       bitmap[(cy * 40 + cx) * 8 + row] = bits;
@@ -159,15 +340,19 @@ function encodeHires(document: RetroImageDocument, layout: "art" | "doodle" | "r
 function encodeKoala(document: RetroImageDocument): Uint8Array {
   const preview = document.preview;
   if (preview.width !== 160 || preview.height !== 200) throw new RetroImageError("VALIDATION_FAILED", "Koala output must be 160x200 logical pixels");
+  const native = nativeCodes(document);
+  const pins = pinnedCodes(document);
   const globalCounts = new Map<number, number>();
-  for (let i = 0; i < preview.width * preview.height; i += 1) {
+  for (let i = 0; !native && i < preview.width * preview.height; i += 1) {
     const color = nearestColorIndex({ r: preview.data[i * 4]!, g: preview.data[i * 4 + 1]!, b: preview.data[i * 4 + 2]! }, c64Palette);
     globalCounts.set(color, (globalCounts.get(color) ?? 0) + 1);
   }
-  const background = [...globalCounts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
+  const background = native ? nativeKoalaBackground(document) : [...globalCounts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
   const bitmap = new Uint8Array(8000), screen = new Uint8Array(1000), colorRam = new Uint8Array(1000);
   for (let cy = 0; cy < 25; cy += 1) for (let cx = 0; cx < 40; cx += 1) {
-    const colors = cellColors(preview, cx, cy, 4, 4, background);
+    const pinned = native ? nativePinnedCodes(native, pins, 160, cx, cy, 4).filter((code) => code !== background) : [];
+    if (pinned.length > 3) nativeConstraintError(cx, cy, pinned, 3, background);
+    const colors = native ? [background, ...pinned, ...nativeCellColors(native, 160, cx, cy, 4).filter((code) => code !== background && !pinned.includes(code))].slice(0, 4) : cellColors(preview, cx, cy, 4, 4, background);
     while (colors.length < 4) colors.push(colors.at(-1) ?? background);
     screen[cy * 40 + cx] = (colors[1]! << 4) | colors[2]!;
     colorRam[cy * 40 + cx] = colors[3]!;
@@ -175,7 +360,7 @@ function encodeKoala(document: RetroImageDocument): Uint8Array {
       let bits = 0;
       for (let x = 0; x < 4; x += 1) {
         const pixel = ((cy * 8 + row) * 160 + cx * 4 + x) * 4;
-        const selected = nearestColorIndex({ r: preview.data[pixel]!, g: preview.data[pixel + 1]!, b: preview.data[pixel + 2]! }, colors.map((color) => c64Palette[color]!));
+        const selected = native ? selectedNativeColor(document, (cy * 8 + row) * 160 + cx * 4 + x, colors) : nearestColorIndex({ r: preview.data[pixel]!, g: preview.data[pixel + 1]!, b: preview.data[pixel + 2]! }, colors.map((color) => c64Palette[color]!));
         bits |= selected << (6 - x * 2);
       }
       bitmap[(cy * 40 + cx) * 8 + row] = bits;
@@ -184,6 +369,37 @@ function encodeKoala(document: RetroImageDocument): Uint8Array {
   const output = new Uint8Array(10003);
   output.set([0x00, 0x60]); output.set(bitmap, 2); output.set(screen, 8002); output.set(colorRam, 9002); output[10002] = background;
   return output;
+}
+
+function convertNativeC64(
+  image: RgbaImage | RetroImageDocument,
+  target: CodecTarget,
+  mode: FormatModeDefinition,
+  options: ConversionOptions,
+  encode: (document: RetroImageDocument) => Uint8Array,
+  decode: (data: Uint8Array, palette: RgbColor[]) => RasterDocument,
+  cellMessage: string
+): ConversionResult {
+  const prepared = prepareConversionImage(image, mode, options);
+  const mapped = nativeRaster(prepared.image, target, mode, options.c64!);
+  const output = encode(mapped.document);
+  const document = decode(output, options.c64!.displayPalette);
+  return {
+    document,
+    report: {
+      target,
+      steps: [
+        ...prepared.steps,
+        {
+          operation: "c64-color-code-map",
+          message: "Mapped source RGB colors to native VIC-II color codes",
+          details: { weightedMeanDistance: mapped.report.weightedMeanDistance, matches: mapped.report.matches }
+        },
+        { operation: "c64-cells", message: cellMessage }
+      ],
+      warnings: []
+    }
+  };
 }
 
 export const c64KoalaPlugin: FormatPlugin = {
@@ -197,6 +413,10 @@ export const c64KoalaPlugin: FormatPlugin = {
   async encode(document): Promise<EncodeResult> { return { data: encodeKoala(document), formatId: koalaDefinition.id, warnings: [] }; },
   analyze(image, target) { return formatIssues(image, target, multicolorMode); },
   async convert(image, target, options) {
+    if (options.c64) return convertNativeC64(image, target, multicolorMode, options, encodeKoala, (output, palette) => {
+      const payload = output.subarray(2);
+      return decodeMulticolor(payload.subarray(0, 8000), payload.subarray(8000, 9000), payload.subarray(9000, 10000), payload[10000]!, koalaDefinition.id, { displayProfile: target.displayProfile, palette });
+    }, "Optimized four VIC-II colors per multicolor cell with one shared background");
     const converted = await genericConvert(image, target, multicolorMode, options);
     const output = encodeKoala(converted.document);
     const p = output.subarray(2);
@@ -217,6 +437,10 @@ export const c64ArtStudioPlugin: FormatPlugin = {
   async encode(document): Promise<EncodeResult> { return { data: encodeHires(document, "art"), formatId: artDefinition.id, warnings: [] }; },
   analyze(image, target) { return formatIssues(image, target, hiresMode); },
   async convert(image, target, options) {
+    if (options.c64) return convertNativeC64(image, target, hiresMode, options, (document) => encodeHires(document, "art"), (output, palette) => {
+      const payload = output.subarray(2);
+      return decodeHires(payload.subarray(0, 8000), payload.subarray(8000, 9000), artDefinition.id, { displayProfile: target.displayProfile, palette });
+    }, "Optimized two VIC-II colors per hires cell");
     const converted = await genericConvert(image, target, hiresMode, options);
     const output = encodeHires(converted.document, "art");
     const p = output.subarray(2);
@@ -237,6 +461,10 @@ export const c64DoodlePlugin: FormatPlugin = {
   async encode(document): Promise<EncodeResult> { return { data: encodeHires(document, "doodle"), formatId: doodleDefinition.id, warnings: [] }; },
   analyze(image, target) { return formatIssues(image, target, hiresMode); },
   async convert(image, target, options) {
+    if (options.c64) return convertNativeC64(image, target, hiresMode, options, (document) => encodeHires(document, "doodle"), (output, palette) => {
+      const payload = output.subarray(2);
+      return decodeHires(payload.subarray(1024, 9024), payload.subarray(0, 1000), doodleDefinition.id, { displayProfile: target.displayProfile, palette });
+    }, "Optimized two VIC-II colors per Doodle cell");
     const converted = await genericConvert(image, target, hiresMode, options);
     const output = encodeHires(converted.document, "doodle");
     const p = output.subarray(2);
@@ -306,6 +534,16 @@ export const c64RawPlugin: FormatPlugin = {
   async convert(image, target, options) {
     if (target.modeId !== "hires-bitmap" && target.modeId !== "multicolor-bitmap") throw new RetroImageError("UNSUPPORTED_MODE", "Automatic RGBA-to-charset generation is not available; supply native charset and screen components");
     const mode = target.modeId === "hires-bitmap" ? hiresMode : multicolorMode;
+    if (options.c64) {
+      if (target.modeId === "hires-bitmap") return convertNativeC64(image, target, mode, options, (document) => encodeHires(document, "art"), (output, palette) => {
+        const art = output.subarray(2);
+        return decodeHires(art.subarray(0, 8000), art.subarray(8000, 9000), rawDefinition.id, { displayProfile: target.displayProfile, palette });
+      }, "Optimized raw hires bitmap and screen memory");
+      return convertNativeC64(image, target, mode, options, encodeKoala, (output, palette) => {
+        const payload = output.subarray(2);
+        return decodeMulticolor(payload.subarray(0, 8000), payload.subarray(8000, 9000), payload.subarray(9000, 10000), payload[10000]!, rawDefinition.id, { displayProfile: target.displayProfile, palette });
+      }, "Optimized raw multicolor bitmap, screen, color RAM, and background");
+    }
     const converted = await genericConvert(image, target, mode, options);
     if (target.modeId === "hires-bitmap") {
       const art = encodeHires(converted.document, "art").subarray(2);

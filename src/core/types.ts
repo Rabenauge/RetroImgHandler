@@ -377,12 +377,39 @@ export type ResizeMode = "none" | "nearest" | "crop" | "pad";
 /** Supported deterministic dithering modes. */
 export type DitherMode = "none" | "bayer2" | "bayer4" | "floyd-steinberg";
 
+/** One source color considered for a native C64 color-code match. */
+export interface C64ColorMatchSample {
+  color: RgbColor;
+  weight?: number;
+  pinnedColorCode?: number;
+}
+
+/** One native C64 color-code match and its weighted aggregate error. */
+export interface C64ColorMatchResult {
+  matches: Array<{ colorCode: number; distance: number; pinned: boolean }>;
+  weightedMeanDistance: number;
+}
+
+/** Optional direct source-RGB to native C64 color-code association. */
+export interface C64SourceColorCode {
+  sourceColor: RgbColor;
+  colorCode: number;
+  pinned?: boolean;
+}
+
+/** C64 conversion display interpretation and optional native-code associations. */
+export interface C64ConversionOptions {
+  displayPalette: RgbColor[];
+  sourceColorCodes?: C64SourceColorCode[];
+}
+
 /** Explicit conversion options; omitted operations are not performed. */
 export interface ConversionOptions {
   resize?: ResizeMode;
   dither?: DitherMode;
   background?: RgbColor;
   maxSampleValue?: number;
+  c64?: C64ConversionOptions;
 }
 
 /** One mutation made by conversion. */

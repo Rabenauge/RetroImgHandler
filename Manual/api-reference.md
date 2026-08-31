@@ -20,6 +20,8 @@
 ## Root types
 
 `AnalysisIssue`, `AnalysisResult`, `BaseImageDocument`, `BinarySource`,
+`C64ColorMatchResult`, `C64ColorMatchSample`, `C64ConversionOptions`,
+`C64SourceColorCode`,
 `CharsetDocument`, `CodecTarget`, `CodecWarning`, `ConversionOptions`,
 `ConversionReport`, `ConversionResult`, `DecodeHints`, `DecodeOptions`,
 `DetectionResult`, `DimensionRange`, `DisplayProfile`, `DisplayVariantDefinition`,
@@ -38,7 +40,8 @@
 `TilemapDocument` define the
 stable schema-version-1 plugin and document contracts.
 
-`DecodeOptions.pfm` selects explicit PFM row order and preview exposure/tone
+`ConversionOptions.c64` selects a required 16-color display palette and optional
+source RGB-to-native-code associations for C64 conversion. `DecodeOptions.pfm` selects explicit PFM row order and preview exposure/tone
 mapping. `EncodeOptions.pfm` overrides PFM row order, byte order, or positive
 scale factor. `ConversionOptions.maxSampleValue` selects integer Netpbm output
 precision from 1 through 65535.
@@ -52,7 +55,7 @@ precision from 1 through 65535.
 
 - Amiga: `amigaIlbmPlugin`, `amigaRawPlanarPlugin`, `amigaPlugins`, `amigaRgb12`.
 - C64: `c64KoalaPlugin`, `c64ArtStudioPlugin`, `c64DoodlePlugin`, `c64RawPlugin`,
-  `c64Palette`, `c64Plugins`.
+  `c64Palette`, `c64Plugins`, `matchC64ColorCodes`.
 - Spectrum: `spectrumScrPlugin`, `spectrumPalette`, `spectrumPlugins`.
 - Atari ST: `atariStDegasPlugin`, `atariStDegasCompressedPlugin`,
   `atariStNeoPlugin`, `atariStRawPlugin`, `atariStPlugins`.
