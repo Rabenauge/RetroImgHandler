@@ -149,6 +149,33 @@ describe("C64 bitmap formats", () => {
     expect(roundtripped.components.border).toEqual(Uint8Array.of(5));
   });
 
+  it("retains a sanitized Raw Multicolor C64 border component and metadata", async () => {
+    const registry = createRegistry(c64Plugins);
+    const bitmap = new Uint8Array(8000);
+    const decoded = await registry.decode(bitmap, {
+      formatId: "c64.raw",
+      modeId: "multicolor-bitmap",
+      components: {
+        screen: new Uint8Array(1000),
+        colorRam: new Uint8Array(1000),
+        background: Uint8Array.of(0xf3),
+        border: Uint8Array.of(0xfe)
+      }
+    });
+
+    if (decoded.kind !== "raster") throw new Error("Expected raster");
+    expect(decoded.metadata.c64BorderColorCode).toBe(14);
+    expect(decoded.components.border).toEqual(Uint8Array.of(14));
+    const roundtripped = await registry.decode((await registry.encode(decoded)).data, {
+      formatId: "c64.raw",
+      modeId: "multicolor-bitmap",
+      components: decoded.components
+    });
+    if (roundtripped.kind !== "raster") throw new Error("Expected raster");
+    expect(roundtripped.metadata.c64BorderColorCode).toBe(14);
+    expect(roundtripped.components.border).toEqual(Uint8Array.of(14));
+  });
+
   it("rejects Raw C64 border components that do not contain exactly one byte", async () => {
     const registry = createRegistry(c64Plugins);
 
@@ -192,6 +219,20 @@ describe("C64 bitmap formats", () => {
     const encoded = await registry.encode(converted.document);
 
     expect(encoded.data[10002]).toBe(2);
+  });
+
+  it.each([
+    ["c64.koala", "multicolor-bitmap", 160, 200],
+    ["c64.art-studio", "hires-bitmap", 320, 200],
+    ["c64.doodle", "hires-bitmap", 320, 200]
+  ] as const)("keeps %s bytes unchanged when conversion records a separate border code", async (formatId, modeId, width, height) => {
+    const registry = createRegistry(c64Plugins);
+    const target = { formatId, modeId, displayProfile: { hardware: "vic-ii" as const, videoStandard: "pal" as const } };
+    const source = rgba(width, height, c64Palette[2]!);
+    const withoutBorder = await registry.convert(source, target, { dither: "none", c64: { displayPalette: c64Palette } });
+    const withBorder = await registry.convert(source, target, { dither: "none", c64: { displayPalette: c64Palette, borderColorCode: 14 } });
+
+    expect((await registry.encode(withBorder.document)).data).toEqual((await registry.encode(withoutBorder.document)).data);
   });
 
   it("encodes native C64 indices without rematching a misleading preview", async () => {
