@@ -401,6 +401,7 @@ export interface C64SourceColorCode {
 export interface C64ConversionOptions {
   displayPalette: RgbColor[];
   sourceColorCodes?: C64SourceColorCode[];
+  borderColorCode?: number;
 }
 
 /** Explicit conversion options; omitted operations are not performed. */

@@ -84,6 +84,81 @@ describe("C64 bitmap formats", () => {
     expect(converted.document.preview.data.slice(0, 4)).toEqual(new Uint8ClampedArray([3, 5, 7, 255]));
   });
 
+  it("retains a supplied VIC-II border code separately from bitmap colors", async () => {
+    const registry = createRegistry(c64Plugins);
+    const converted = await registry.convert(rgba(160, 200, c64Palette[2]!), {
+      formatId: "c64.koala",
+      modeId: "multicolor-bitmap",
+      displayProfile: { hardware: "vic-ii", videoStandard: "pal" }
+    }, { dither: "none", c64: { displayPalette: c64Palette, borderColorCode: 14 } });
+
+    if (converted.document.kind !== "raster") throw new Error("Expected raster");
+    expect(converted.document.metadata.c64BorderColorCode).toBe(14);
+    expect(converted.document.components.border).toEqual(Uint8Array.of(14));
+    expect(converted.report.steps).toContainEqual(expect.objectContaining({
+      operation: "c64-border-color",
+      details: { colorCode: 14 }
+    }));
+  });
+
+  it("does not invent a C64 border component when its option is omitted", async () => {
+    const registry = createRegistry(c64Plugins);
+    const converted = await registry.convert(rgba(160, 200, c64Palette[2]!), {
+      formatId: "c64.koala",
+      modeId: "multicolor-bitmap",
+      displayProfile: { hardware: "vic-ii", videoStandard: "pal" }
+    }, { dither: "none", c64: { displayPalette: c64Palette } });
+
+    if (converted.document.kind !== "raster") throw new Error("Expected raster");
+    expect(converted.document.metadata.c64BorderColorCode).toBeUndefined();
+    expect(converted.document.components.border).toBeUndefined();
+  });
+
+  it.each([-1, 16, 1.5])("rejects invalid C64 border color code %s", async (borderColorCode) => {
+    const registry = createRegistry(c64Plugins);
+
+    await expect(registry.convert(rgba(160, 200, c64Palette[2]!), {
+      formatId: "c64.koala",
+      modeId: "multicolor-bitmap",
+      displayProfile: { hardware: "vic-ii", videoStandard: "pal" }
+    }, { dither: "none", c64: { displayPalette: c64Palette, borderColorCode } })).rejects.toMatchObject({ code: "INVALID_OPTION" });
+  });
+
+  it("retains a sanitized Raw C64 border component and metadata", async () => {
+    const registry = createRegistry(c64Plugins);
+    const bitmap = new Uint8Array(8000);
+    const screen = new Uint8Array(1000);
+    const decoded = await registry.decode(bitmap, {
+      formatId: "c64.raw",
+      modeId: "hires-bitmap",
+      components: { screen, border: Uint8Array.of(0xf5) }
+    });
+
+    if (decoded.kind !== "raster") throw new Error("Expected raster");
+    expect(decoded.metadata.c64BorderColorCode).toBe(5);
+    expect(decoded.components.border).toEqual(Uint8Array.of(5));
+    const encoded = await registry.encode(decoded);
+    expect(encoded.data).toEqual(bitmap);
+    const roundtripped = await registry.decode(encoded.data, {
+      formatId: "c64.raw",
+      modeId: "hires-bitmap",
+      components: decoded.components
+    });
+    if (roundtripped.kind !== "raster") throw new Error("Expected raster");
+    expect(roundtripped.metadata.c64BorderColorCode).toBe(5);
+    expect(roundtripped.components.border).toEqual(Uint8Array.of(5));
+  });
+
+  it("rejects Raw C64 border components that do not contain exactly one byte", async () => {
+    const registry = createRegistry(c64Plugins);
+
+    await expect(registry.decode(new Uint8Array(8000), {
+      formatId: "c64.raw",
+      modeId: "hires-bitmap",
+      components: { screen: new Uint8Array(1000), border: Uint8Array.of(1, 2) }
+    })).rejects.toMatchObject({ code: "INVALID_OPTION" });
+  });
+
   it("reports the cell and pinned native codes when C64 hires packing is impossible", async () => {
     const registry = createRegistry(c64Plugins);
     const source = rgba(320, 200, { r: 10, g: 10, b: 10 });

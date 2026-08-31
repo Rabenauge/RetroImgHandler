@@ -39,6 +39,13 @@ function validateColorCode(colorCode: number, label: string): void {
   if (!Number.isInteger(colorCode) || colorCode < 0 || colorCode > 15) throw new RetroImageError("INVALID_OPTION", `${label} must be a C64 color code from 0 through 15`);
 }
 
+function rawBorderColorCode(options: DecodeOptions): number | undefined {
+  const border = options.components?.border;
+  if (!border) return undefined;
+  if (border.length !== 1) throw new RetroImageError("INVALID_OPTION", "Raw C64 border component must contain exactly one byte");
+  return border[0]! & 0xf;
+}
+
 function linearSrgb(component: number): number {
   const value = Math.max(0, Math.min(255, component)) / 255;
   return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
@@ -425,11 +432,17 @@ function convertNativeC64(
     entries = mapped.entries;
     weightedMeanDistance = mapped.report.weightedMeanDistance;
   }
+  const borderColorCode = options.c64!.borderColorCode;
+  if (borderColorCode !== undefined) validateColorCode(borderColorCode, "borderColorCode");
   const reportEntries = entries.map(({ sourceColor, colorCode, distance, pinned }) => ({
     sourceColor: { r: sourceColor.r, g: sourceColor.g, b: sourceColor.b }, colorCode, distance, pinned
   }));
   const output = encode(documentToEncode);
   const document = decode(output, options.c64!.displayPalette);
+  if (borderColorCode !== undefined) {
+    document.metadata.c64BorderColorCode = borderColorCode;
+    document.components.border = Uint8Array.of(borderColorCode);
+  }
   return {
     document,
     report: {
@@ -444,6 +457,7 @@ function convertNativeC64(
             matches: reportEntries
           }
         },
+        ...(borderColorCode === undefined ? [] : [{ operation: "c64-border-color", message: "Recorded separate VIC-II border color code", details: { colorCode: borderColorCode } }]),
         { operation: "c64-cells", message: cellMessage }
       ],
       warnings: []
@@ -531,12 +545,21 @@ function decodeCharset(data: Uint8Array, options: DecodeOptions): RetroImageDocu
   if (modeId === "hires-bitmap") {
     const screen = options.components?.screen;
     if (!screen) throw new RetroImageError("MISSING_HINT", "Raw hires bitmap requires components.screen");
-    return decodeHires(data, screen, rawDefinition.id, options);
+    const borderColorCode = rawBorderColorCode(options);
+    const document = decodeHires(data, screen, rawDefinition.id, options, borderColorCode === undefined ? {} : { border: Uint8Array.of(borderColorCode) });
+    if (borderColorCode !== undefined) document.metadata.c64BorderColorCode = borderColorCode;
+    return document;
   }
   if (modeId === "multicolor-bitmap") {
     const screen = options.components?.screen, colorRam = options.components?.colorRam;
     if (!screen || !colorRam) throw new RetroImageError("MISSING_HINT", "Raw multicolor bitmap requires screen and colorRam components");
-    return decodeMulticolor(data, screen, colorRam, options.components?.background?.[0] ?? 0, rawDefinition.id, options);
+    const borderColorCode = rawBorderColorCode(options);
+    const document = decodeMulticolor(data, screen, colorRam, options.components?.background?.[0] ?? 0, rawDefinition.id, options);
+    if (borderColorCode !== undefined) {
+      document.components.border = Uint8Array.of(borderColorCode);
+      document.metadata.c64BorderColorCode = borderColorCode;
+    }
+    return document;
   }
   const charset = options.components?.charset ?? data;
   if (charset.length < 512) throw new RetroImageError("INVALID_FILE", "C64 charset must contain at least 64 glyphs");
