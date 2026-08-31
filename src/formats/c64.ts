@@ -92,6 +92,7 @@ interface NativeC64Codes {
   indices: Uint8Array;
   pinnedCodes: Uint8Array;
   report: C64ColorMatchResult;
+  entries: Array<{ sourceColor: RgbColor; colorCode: number; distance: number; pinned: boolean }>;
 }
 
 function mapNativeC64Codes(image: RgbaImage, options: C64ConversionOptions): NativeC64Codes {
@@ -103,16 +104,16 @@ function mapNativeC64Codes(image: RgbaImage, options: C64ConversionOptions): Nat
     if (sourceColorCodes.has(key)) throw new RetroImageError("INVALID_OPTION", "sourceColorCodes must not map one RGB color more than once");
     sourceColorCodes.set(key, { colorCode: source.colorCode, pinned: source.pinned ?? false });
   }
-  const assignments = new Map<string, { colorCode: number; distance: number; pinned: boolean }>();
+  const assignments = new Map<string, { sourceColor: RgbColor; colorCode: number; distance: number; pinned: boolean }>();
   for (let pixel = 0; pixel < image.width * image.height; pixel += 1) {
     const color = rgbaColorAt(image, pixel);
     const key = colorKey(color);
     if (assignments.has(key)) continue;
     const source = sourceColorCodes.get(key);
     if (source) {
-      assignments.set(key, { colorCode: source.colorCode, distance: oklabDistanceSquared(color, options.displayPalette[source.colorCode]!), pinned: source.pinned });
+      assignments.set(key, { sourceColor: { r: color.r, g: color.g, b: color.b }, colorCode: source.colorCode, distance: oklabDistanceSquared(color, options.displayPalette[source.colorCode]!), pinned: source.pinned });
     } else {
-      assignments.set(key, matchC64ColorCodes([{ color }], options.displayPalette).matches[0]!);
+      assignments.set(key, { sourceColor: { r: color.r, g: color.g, b: color.b }, ...matchC64ColorCodes([{ color }], options.displayPalette).matches[0]! });
     }
   }
   const indices = new Uint8Array(image.width * image.height);
@@ -124,10 +125,11 @@ function mapNativeC64Codes(image: RgbaImage, options: C64ConversionOptions): Nat
     if (assignment.pinned) pinnedCodes[pixel] = assignment.colorCode;
     weightedDistance += assignment.distance;
   }
-  return { indices, pinnedCodes, report: { matches: [...assignments.values()], weightedMeanDistance: weightedDistance / indices.length } };
+  const entries = [...assignments.values()];
+  return { indices, pinnedCodes, report: { matches: entries.map(({ colorCode, distance, pinned }) => ({ colorCode, distance, pinned })), weightedMeanDistance: weightedDistance / indices.length }, entries };
 }
 
-function nativeRaster(image: RgbaImage, target: CodecTarget, mode: FormatModeDefinition, options: C64ConversionOptions): { document: RasterDocument; report: C64ColorMatchResult } {
+function nativeRaster(image: RgbaImage, target: CodecTarget, mode: FormatModeDefinition, options: C64ConversionOptions): { document: RasterDocument; report: C64ColorMatchResult; entries: NativeC64Codes["entries"] } {
   const mapped = mapNativeC64Codes(image, options);
   return {
     document: {
@@ -136,7 +138,8 @@ function nativeRaster(image: RgbaImage, target: CodecTarget, mode: FormatModeDef
       preview: indexedToRgba(mapped.indices, image.width, image.height, options.displayPalette), components: { c64PinnedCodes: mapped.pinnedCodes },
       metadata: { c64NativeColorCodes: true }, warnings: [], preserved: []
     },
-    report: mapped.report
+    report: mapped.report,
+    entries: mapped.entries
   };
 }
 
@@ -146,6 +149,32 @@ function nativeCodes(document: RetroImageDocument): Uint8Array | undefined {
 
 function pinnedCodes(document: RetroImageDocument): Uint8Array | undefined {
   return document.kind === "raster" && document.metadata.c64NativeColorCodes === true ? document.components.c64PinnedCodes : undefined;
+}
+
+function nativeRasterForTarget(source: RasterDocument, target: CodecTarget, mode: FormatModeDefinition, options: C64ConversionOptions): { document: RasterDocument; entries: NativeC64Codes["entries"] } {
+  validateDisplayPalette(options.displayPalette);
+  const targetSize = mode.dimensions[0];
+  if (!targetSize || source.width !== targetSize.width || source.height !== targetSize.height) {
+    throw new RetroImageError("VALIDATION_FAILED", "Configured native C64 raster resize is not supported; use matching target dimensions");
+  }
+  const pins = pinnedCodes(source);
+  const pinByCode = new Set<number>();
+  if (pins) for (let pixel = 0; pixel < pins.length; pixel += 1) if (pins[pixel] !== 255) pinByCode.add(source.indices[pixel]!);
+  const usedCodes = [...new Set(source.indices)].sort((a, b) => a - b);
+  const sourcePalette = source.palette.length === 16 ? source.palette : c64Palette;
+  return {
+    document: {
+      ...source,
+      formatId: target.formatId,
+      modeId: target.modeId,
+      pixelAspect: mode.pixelAspect,
+      displayProfile: target.displayProfile,
+      palette: options.displayPalette.map((color) => ({ ...color })),
+      preview: indexedToRgba(source.indices, source.width, source.height, options.displayPalette),
+      metadata: { ...source.metadata, c64NativeColorCodes: true }
+    },
+    entries: usedCodes.map((colorCode) => ({ sourceColor: { ...sourcePalette[colorCode]! }, colorCode, distance: 0, pinned: pinByCode.has(colorCode) }))
+  };
 }
 
 const hiresMode: FormatModeDefinition = {
@@ -380,20 +409,40 @@ function convertNativeC64(
   decode: (data: Uint8Array, palette: RgbColor[]) => RasterDocument,
   cellMessage: string
 ): ConversionResult {
-  const prepared = prepareConversionImage(image, mode, options);
-  const mapped = nativeRaster(prepared.image, target, mode, options.c64!);
-  const output = encode(mapped.document);
+  const sourceNative = "kind" in image && image.kind === "raster" && nativeCodes(image) ? image : undefined;
+  const prepared = sourceNative ? undefined : prepareConversionImage(image, mode, options);
+  let documentToEncode: RasterDocument;
+  let entries: NativeC64Codes["entries"];
+  let weightedMeanDistance: number;
+  if (sourceNative) {
+    const mapped = nativeRasterForTarget(sourceNative, target, mode, options.c64!);
+    documentToEncode = mapped.document;
+    entries = mapped.entries;
+    weightedMeanDistance = 0;
+  } else {
+    const mapped = nativeRaster(prepared!.image, target, mode, options.c64!);
+    documentToEncode = mapped.document;
+    entries = mapped.entries;
+    weightedMeanDistance = mapped.report.weightedMeanDistance;
+  }
+  const reportEntries = entries.map(({ sourceColor, colorCode, distance, pinned }) => ({
+    sourceColor: { r: sourceColor.r, g: sourceColor.g, b: sourceColor.b }, colorCode, distance, pinned
+  }));
+  const output = encode(documentToEncode);
   const document = decode(output, options.c64!.displayPalette);
   return {
     document,
     report: {
       target,
       steps: [
-        ...prepared.steps,
+        ...(prepared?.steps ?? []),
         {
           operation: "c64-color-code-map",
           message: "Mapped source RGB colors to native VIC-II color codes",
-          details: { weightedMeanDistance: mapped.report.weightedMeanDistance, matches: mapped.report.matches }
+          details: {
+            weightedMeanDistance,
+            matches: reportEntries
+          }
         },
         { operation: "c64-cells", message: cellMessage }
       ],

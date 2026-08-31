@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createRegistry, indexedToRgba, type RasterDocument } from "../../src/index";
+import { createRegistry, indexedToRgba, RetroImageError, type RasterDocument } from "../../src/index";
 import { c64Palette, c64Plugins, matchC64ColorCodes } from "../../src/c64";
 
 function blank(formatId: string, modeId: string, width: number, height: number): RasterDocument {
@@ -11,6 +11,17 @@ function rgba(width: number, height: number, color: { r: number; g: number; b: n
   const data = new Uint8ClampedArray(width * height * 4);
   for (let pixel = 0; pixel < width * height; pixel += 1) data.set([color.r, color.g, color.b, 255], pixel * 4);
   return { width, height, data };
+}
+
+function c64ReportEntry(value: unknown): { sourceColor: { r: number; g: number; b: number }; colorCode: number; distance: number; pinned: boolean } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entry = value as Record<string, unknown>;
+  const sourceColor = entry.sourceColor;
+  if (!sourceColor || typeof sourceColor !== "object" || Array.isArray(sourceColor)) return undefined;
+  const color = sourceColor as Record<string, unknown>;
+  if (typeof color.r !== "number" || typeof color.g !== "number" || typeof color.b !== "number") return undefined;
+  if (typeof entry.colorCode !== "number" || typeof entry.distance !== "number" || typeof entry.pinned !== "boolean") return undefined;
+  return { sourceColor: { r: color.r, g: color.g, b: color.b }, colorCode: entry.colorCode, distance: entry.distance, pinned: entry.pinned };
 }
 
 describe("C64 bitmap formats", () => {
@@ -120,5 +131,98 @@ describe("C64 bitmap formats", () => {
     const encoded = await registry.encode(document);
 
     expect(encoded.data[10002]).toBe(9);
+  });
+
+  it("keeps same-size decoded C64 native codes when a configured display palette changes", async () => {
+    const registry = createRegistry(c64Plugins);
+    const koala = new Uint8Array(10003);
+    koala.set([0x00, 0x60]);
+    koala[10002] = 9;
+    const source = await registry.decode(koala, { formatId: "c64.koala" });
+    const displayPalette = c64Palette.map((color) => ({ ...color }));
+    displayPalette[0] = { ...c64Palette[9]! };
+    displayPalette[9] = { r: 3, g: 5, b: 7 };
+
+    const converted = await registry.convert(source, {
+      formatId: "c64.koala",
+      modeId: "multicolor-bitmap",
+      displayProfile: { hardware: "vic-ii", videoStandard: "pal" }
+    }, { dither: "none", c64: { displayPalette } });
+
+    if (converted.document.kind !== "raster") throw new Error("Expected raster");
+    expect(converted.document.indices[0]).toBe(9);
+    expect(converted.document.preview.data.slice(0, 4)).toEqual(new Uint8ClampedArray([3, 5, 7, 255]));
+    expect((await registry.encode(converted.document)).data[10002]).toBe(9);
+  });
+
+  it("retains same-size native C64 pins while packing a configured conversion", async () => {
+    const registry = createRegistry(c64Plugins);
+    const source = blank("c64.koala", "multicolor-bitmap", 160, 200);
+    source.metadata.c64NativeColorCodes = true;
+    source.indices.set([1, 2, 3, 4]);
+    const pins = new Uint8Array(source.indices.length).fill(255);
+    pins[3] = 4;
+    source.components.c64PinnedCodes = pins;
+
+    const converted = await registry.convert(source, {
+      formatId: "c64.koala",
+      modeId: "multicolor-bitmap",
+      displayProfile: { hardware: "vic-ii", videoStandard: "pal" }
+    }, { dither: "none", c64: { displayPalette: c64Palette } });
+
+    if (converted.document.kind !== "raster") throw new Error("Expected raster");
+    expect(converted.document.indices[3]).toBe(4);
+  });
+
+  it("rejects configured native C64 raster resizing instead of rematching its preview", async () => {
+    const registry = createRegistry(c64Plugins);
+    const source = blank("c64.art-studio", "hires-bitmap", 320, 200);
+    source.indices.fill(9);
+    source.metadata.c64NativeColorCodes = true;
+
+    const error = await registry.convert(source, {
+      formatId: "c64.koala",
+      modeId: "multicolor-bitmap",
+      displayProfile: { hardware: "vic-ii", videoStandard: "pal" }
+    }, { resize: "nearest", dither: "none", c64: { displayPalette: c64Palette } }).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(RetroImageError);
+    if (!(error instanceof RetroImageError)) throw new Error("Expected RetroImageError");
+    expect(error.code).toBe("VALIDATION_FAILED");
+    expect(error.message).toMatch(/native C64 raster.*resize/i);
+  });
+
+  it("reports source RGB with pinned and unpinned native color-code mappings", async () => {
+    const registry = createRegistry(c64Plugins);
+    const source = rgba(160, 200, { r: 24, g: 48, b: 72 });
+    source.data.set([80, 100, 120, 255], 4);
+
+    const converted = await registry.convert(source, {
+      formatId: "c64.koala",
+      modeId: "multicolor-bitmap",
+      displayProfile: { hardware: "vic-ii", videoStandard: "pal" }
+    }, {
+      dither: "none",
+      c64: {
+        displayPalette: c64Palette,
+        sourceColorCodes: [
+          { sourceColor: { r: 24, g: 48, b: 72 }, colorCode: 2, pinned: true },
+          { sourceColor: { r: 80, g: 100, b: 120 }, colorCode: 3 }
+        ]
+      }
+    });
+    const report = converted.report.steps.find(({ operation }) => operation === "c64-color-code-map");
+    const details = report?.details;
+    if (!details || typeof details !== "object" || Array.isArray(details)) throw new Error("Expected mapping report details");
+    const matches = (details as Record<string, unknown>).matches;
+    if (!Array.isArray(matches)) throw new Error("Expected mapping report entries");
+    const entries = matches.map(c64ReportEntry).filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+    const pinned = entries.find(({ colorCode }) => colorCode === 2);
+    const unpinned = entries.find(({ colorCode }) => colorCode === 3);
+
+    expect(pinned).toMatchObject({ sourceColor: { r: 24, g: 48, b: 72 }, colorCode: 2, pinned: true });
+    expect(unpinned).toMatchObject({ sourceColor: { r: 80, g: 100, b: 120 }, colorCode: 3, pinned: false });
+    expect(pinned?.distance).toBeTypeOf("number");
+    expect(unpinned?.distance).toBeTypeOf("number");
   });
 });
