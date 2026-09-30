@@ -1,6 +1,6 @@
 {
   "name": "retro-img-handler",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Browser and Web Worker codecs for native retro-computer image formats",
   "author": "T.Grothaus (titusrab)",
   "type": "module",
