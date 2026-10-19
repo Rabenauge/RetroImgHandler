@@ -1,6 +1,5 @@
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
-import dts from "vite-plugin-dts";
 
 export default defineConfig({
   build: {
@@ -25,12 +24,5 @@ export default defineConfig({
         chunkFileNames: "chunks/[name]-[hash].js"
       }
     }
-  },
-  plugins: [dts({
-    tsconfigPath: "tsconfig.json",
-    entryRoot: "src",
-    include: ["src"],
-    exclude: ["tests", "demo"],
-    rollupTypes: false
-  })]
+  }
 });
